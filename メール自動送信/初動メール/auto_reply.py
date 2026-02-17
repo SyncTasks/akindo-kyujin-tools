@@ -85,6 +85,17 @@ def process_account(
         print(f'  未送信の応募者はいません')
         return result
 
+    # アカウントのクライアント名と一致する応募者のみに絞る
+    before_count = len(applicants)
+    applicants = [a for a in applicants if a['client_name'] == client_name]
+    skipped_other = before_count - len(applicants)
+    if skipped_other > 0:
+        print(f'  クライアント名フィルタ: {before_count}件 → {len(applicants)}件（他クライアント{skipped_other}件除外）')
+
+    if not applicants:
+        print(f'  このアカウントのクライアント名「{client_name}」に該当する応募者はいません')
+        return result
+
     # ヘッダー行を取得（送信済み更新で列位置を特定するため）
     headers = worksheet.row_values(1)
 
