@@ -110,11 +110,12 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
 
         email = str(record.get('メール', '')).strip()
         password = str(record.get('パス', '')).strip()
+        mail_password = str(record.get('メールパス', '')).strip()
         client_name = _normalize_name(str(record.get('クライアント名', '')))
         template_ss_id = _extract_spreadsheet_id(str(record.get('メール文面', '')).strip())
         imap_server = str(record.get('IMAP', '')).strip()
 
-        if not email or not password:
+        if not email or (not password and not mail_password):
             print(f'  警告: {client_name} のメール/パスが未設定、スキップ')
             continue
 
@@ -128,6 +129,7 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
         accounts.append({
             'email': email,
             'password': password,
+            'mail_password': mail_password,
             'client_name': client_name,
             'template_spreadsheet_id': template_ss_id,
             'smtp_server': smtp_server,

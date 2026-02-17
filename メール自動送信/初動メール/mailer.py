@@ -22,17 +22,19 @@ def send_email(
     body: str,
     smtp_server: str = 'smtp.muumuu-mail.com',
     smtp_port: int = 587,
+    fallback_password: str = '',
 ) -> bool:
     """メールを送信する
 
     Args:
         smtp_user: SMTP認証ユーザ（= 送信元アドレス）
-        smtp_password: SMTPパスワード
+        smtp_password: SMTPパスワード（「パス」列）
         to_address: 送信先アドレス
         subject: 件名
         body: 本文（プレーンテキスト）
         smtp_server: SMTPサーバーアドレス
         smtp_port: SMTPポート番号
+        fallback_password: 認証失敗時に試す代替パスワード（「メールパス」列）
 
     Returns:
         True: 送信成功, False: 送信失敗
@@ -43,35 +45,50 @@ def send_email(
     msg['From'] = smtp_user
     msg['To'] = to_address
 
-    for attempt in range(SMTP_MAX_RETRIES):
-        try:
-            with smtplib.SMTP(smtp_server, smtp_port, timeout=SMTP_TIMEOUT) as server:
-                server.starttls()
-                server.login(smtp_user, smtp_password)
-                server.send_message(msg)
+    # 試行するパスワードのリスト（パス列 → メールパス列）
+    passwords = [smtp_password]
+    if fallback_password and fallback_password != smtp_password:
+        passwords.append(fallback_password)
 
-            print(f'    メール送信成功: {to_address}')
-            return True
+    for pw_idx, password in enumerate(passwords):
+        pw_label = '「パス」列' if pw_idx == 0 else '「メールパス」列'
 
-        except smtplib.SMTPAuthenticationError as e:
-            print(f'    SMTP認証エラー: {e}')
-            print(f'    → メールアドレスまたはパスワードを確認してください')
-            return False  # 認証エラーはリトライしない
+        for attempt in range(SMTP_MAX_RETRIES):
+            try:
+                with smtplib.SMTP(smtp_server, smtp_port, timeout=SMTP_TIMEOUT) as server:
+                    server.starttls()
+                    server.login(smtp_user, password)
+                    server.send_message(msg)
 
-        except smtplib.SMTPRecipientsRefused as e:
-            print(f'    送信先拒否エラー: {to_address} - {e}')
-            return False  # 宛先エラーはリトライしない
+                if pw_idx > 0:
+                    print(f'    {pw_label}で認証成功')
+                print(f'    メール送信成功: {to_address}')
+                return True
 
-        except Exception as e:
-            wait_time = (attempt + 1) * SMTP_RETRY_INTERVAL
-            if attempt < SMTP_MAX_RETRIES - 1:
-                print(f'    送信エラー ({attempt + 1}/{SMTP_MAX_RETRIES}): {e}')
-                print(f'    {wait_time}秒後にリトライ...')
-                time.sleep(wait_time)
-            else:
-                print(f'    送信失敗（全{SMTP_MAX_RETRIES}回リトライ済み）: {e}')
-                return False
+            except smtplib.SMTPAuthenticationError as e:
+                print(f'    SMTP認証エラー ({pw_label}): {e}')
+                break  # この パスワードでの認証は諦めて次のパスワードへ
 
+            except smtplib.SMTPRecipientsRefused as e:
+                print(f'    送信先拒否エラー: {to_address} - {e}')
+                return False  # 宛先エラーはリトライしない
+
+            except smtplib.SMTPServerDisconnected:
+                # 認証失敗後にサーバーが切断するケース
+                print(f'    SMTP認証エラー ({pw_label}): サーバーが接続を切断')
+                break  # 次のパスワードへ
+
+            except Exception as e:
+                wait_time = (attempt + 1) * SMTP_RETRY_INTERVAL
+                if attempt < SMTP_MAX_RETRIES - 1:
+                    print(f'    送信エラー ({attempt + 1}/{SMTP_MAX_RETRIES}): {e}')
+                    print(f'    {wait_time}秒後にリトライ...')
+                    time.sleep(wait_time)
+                else:
+                    print(f'    送信失敗（全{SMTP_MAX_RETRIES}回リトライ済み）: {e}')
+                    return False
+
+    print(f'    → 全てのパスワードで認証失敗。スプレッドシートの認証情報を確認してください')
     return False
 
 

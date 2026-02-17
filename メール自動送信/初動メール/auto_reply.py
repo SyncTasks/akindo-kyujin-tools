@@ -56,6 +56,7 @@ def process_account(
     client_name = account['client_name']
     email = account['email']
     password = account['password']
+    mail_password = account.get('mail_password', '')
     ss_id = account['template_spreadsheet_id']
     smtp_server = account.get('smtp_server', 'smtp.muumuu-mail.com')
     smtp_port = account.get('smtp_port', 587)
@@ -159,6 +160,7 @@ def process_account(
             body=body,
             smtp_server=smtp_server,
             smtp_port=smtp_port,
+            fallback_password=mail_password,
         )
 
         if success:
