@@ -151,7 +151,9 @@ def process_account(
 
         # 件名を構築（メール管理シートの「件名」列 → なければデフォルト）
         subject = _build_subject(applicant, client_templates.get('subject', ''))
+        sender_name = client_templates.get('sender_name', '')
 
+        print(f'    送信者名: {sender_name or "(未設定)"}')
         print(f'    件名: {subject}')
         body_preview = body[:100] + '...' if len(body) > 100 else body
         print(f'    本文プレビュー: {body_preview}')
@@ -172,6 +174,7 @@ def process_account(
             smtp_server=smtp_server,
             smtp_port=smtp_port,
             fallback_password=mail_password,
+            sender_name=sender_name,
         )
 
         if success:
@@ -200,7 +203,7 @@ def _build_subject(applicant: dict, subject_template: str = '') -> str:
     メール管理シートの「件名」列にテンプレートがあればそれを使い、
     なければデフォルト件名を使用する。
 
-    件名テンプレート内でも $name, $title 等のプレースホルダーが使用可能。
+    件名テンプレート内でも {列名} プレースホルダーが使用可能。
 
     Args:
         applicant: 応募者情報
@@ -210,17 +213,11 @@ def _build_subject(applicant: dict, subject_template: str = '') -> str:
         件名文字列
     """
     if subject_template:
-        from string import Template
-        try:
-            t = Template(subject_template)
-            return t.safe_substitute(
-                name=applicant.get('name', ''),
-                title=applicant.get('title', ''),
-                age=str(applicant.get('age', '')) if applicant.get('age') is not None else '',
-                client_name=applicant.get('client_name', ''),
-            )
-        except Exception:
-            pass  # テンプレート展開失敗時はデフォルトにフォールバック
+        columns = applicant.get('columns', {})
+        result = subject_template
+        for col_name, col_value in columns.items():
+            result = result.replace('{' + col_name + '}', col_value)
+        return result
 
     # デフォルト件名
     title = applicant.get('title', '')

@@ -8,7 +8,6 @@ import smtplib
 import time
 from email.mime.text import MIMEText
 from email.header import Header
-from string import Template
 from typing import Optional
 
 from config import SMTP_TIMEOUT, SMTP_MAX_RETRIES, SMTP_RETRY_INTERVAL
@@ -23,6 +22,7 @@ def send_email(
     smtp_server: str = 'smtp.muumuu-mail.com',
     smtp_port: int = 587,
     fallback_password: str = '',
+    sender_name: str = '',
 ) -> bool:
     """メールを送信する
 
@@ -35,6 +35,7 @@ def send_email(
         smtp_server: SMTPサーバーアドレス
         smtp_port: SMTPポート番号
         fallback_password: 認証失敗時に試す代替パスワード（「メールパス」列）
+        sender_name: 送信者名（空の場合はメールアドレスのみ）
 
     Returns:
         True: 送信成功, False: 送信失敗
@@ -42,7 +43,10 @@ def send_email(
     # メッセージ作成（日本語対応）
     msg = MIMEText(body, 'plain', 'utf-8')
     msg['Subject'] = Header(subject, 'utf-8')
-    msg['From'] = smtp_user
+    if sender_name:
+        msg['From'] = f'{Header(sender_name, "utf-8").encode()} <{smtp_user}>'
+    else:
+        msg['From'] = smtp_user
     msg['To'] = to_address
 
     # 試行するパスワードのリスト（パス列 → メールパス列）
@@ -95,20 +99,18 @@ def send_email(
 def build_email_body(template: str, applicant: dict) -> Optional[str]:
     """テンプレートに応募者情報を差し込む
 
-    テンプレート内のプレースホルダー（$変数名）を応募者情報で置換する。
-    未定義の変数はそのまま残る（safe_substitute）。
+    テンプレート内の {列名} を応募者シートの対応する列の値で置換する。
+    応募者シートの全列が使用可能。未定義の変数はそのまま残る。
 
-    使用可能なプレースホルダー:
-      $name       - 応募者名
-      $title      - 求人タイトル
-      $age        - 年齢
-      $client_name - クライアント名
+    使用例:
+      {名前}様 ご応募ありがとうございます
+      {タイトル} に応募された {名前}様（{年齢}歳）
 
     テンプレート内の \\n リテラルは実際の改行に変換される。
 
     Args:
         template: テンプレート文面
-        applicant: 応募者情報の辞書
+        applicant: 応募者情報の辞書（columns キーに全列データ）
 
     Returns:
         差し込み済みの本文。テンプレートが空の場合は None。
@@ -119,17 +121,9 @@ def build_email_body(template: str, applicant: dict) -> Optional[str]:
     # スプレッドシート上の \\n リテラルを実際の改行に変換
     body = template.replace('\\n', '\n')
 
-    # プレースホルダー置換（$name, $title 等）
-    # safe_substitute: 未定義の変数はそのまま残す（KeyError にならない）
-    try:
-        t = Template(body)
-        body = t.safe_substitute(
-            name=applicant.get('name', ''),
-            title=applicant.get('title', ''),
-            age=str(applicant.get('age', '')) if applicant.get('age') is not None else '',
-            client_name=applicant.get('client_name', ''),
-        )
-    except Exception as e:
-        print(f'    警告: テンプレート変数置換エラー: {e}')
+    # {列名} を応募者シートの値で置換
+    columns = applicant.get('columns', {})
+    for col_name, col_value in columns.items():
+        body = body.replace('{' + col_name + '}', col_value)
 
     return body

@@ -240,6 +240,12 @@ def get_unsent_applicants(
         # 年齢を取得
         age = _parse_age(_get(row, '年齢'))
 
+        # 全列のデータを列名→値の辞書として格納
+        columns = {}
+        for col_idx, col_name in enumerate(headers):
+            if col_name and col_idx < len(row):
+                columns[col_name] = str(row[col_idx]).strip()
+
         applicants.append({
             'row_index': row_index,
             'name': _get(row, '名前'),
@@ -248,6 +254,7 @@ def get_unsent_applicants(
             'client_name': _normalize_name(_get(row, 'クライアント名') or _get(row, 'クライアント')),
             'title': _get(row, 'タイトル'),
             'application_date': date_str,
+            'columns': columns,
         })
 
     print(f'応募者シート読み込み完了 (SS ID: {spreadsheet_id})')
@@ -271,6 +278,7 @@ def get_mail_templates(
 
     Returns:
         正規化されたクライアント名をキーとした辞書。各値は以下のキーを持つ:
+        - sender_name: 送信者名（「送信者名」列。なければ空）
         - subject: 件名テンプレート（「件名」列。なければデフォルト使用）
         - under_35: 34歳以下向けテンプレート文面
         - over_35: 35歳以上向けテンプレート文面
@@ -308,7 +316,7 @@ def get_mail_templates(
 
     # ヘッダー行から必要な列のインデックスを特定
     col_map = {}
-    for col_name in ['クライアント名', '件名', '34歳以下', '35歳以上']:
+    for col_name in ['クライアント名', '送信者名', '件名', '34歳以下', '35歳以上']:
         try:
             col_map[col_name] = headers.index(col_name)
         except ValueError:
@@ -327,11 +335,13 @@ def get_mail_templates(
                 return ''
             return str(row[i]).strip()
 
+        sender_name = _get_cell('送信者名')
         subject = _get_cell('件名')
         under_35 = _get_cell('34歳以下')
         over_35 = _get_cell('35歳以上')
 
         templates[client_name] = {
+            'sender_name': sender_name,
             'subject': subject,
             'under_35': under_35,
             'over_35': over_35,
