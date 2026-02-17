@@ -1,0 +1,14 @@
+# 認証情報
+credentials.json
+.env
+
+# Python
+venv/
+__pycache__/
+*.pyc
+
+# ログ
+logs/
+
+# Claude Code
+.claude/
