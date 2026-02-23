@@ -252,9 +252,7 @@ def get_unsent_applicants(
             continue
 
         # 過去に送信済みのメールアドレスはスキップ（再応募の重複送信防止）
-        # 2026/2/24以降の応募のみ適用
-        duplicate_check_start = datetime(2026, 2, 24, tzinfo=JST)
-        if application_date >= duplicate_check_start and email_address.lower() in sent_emails:
+        if email_address.lower() in sent_emails:
             skipped_already_contacted += 1
             print(f'  行{row_index}: 過去送信済みアドレス、スキップ ({_get(row, "名前")}: {email_address})')
             continue
