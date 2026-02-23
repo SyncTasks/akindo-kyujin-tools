@@ -198,12 +198,26 @@ def get_unsent_applicants(
     skipped_sent = 0
     skipped_old = 0
     skipped_no_email = 0
+    skipped_already_contacted = 0
 
     def _get(row, col_name):
         i = col_map[col_name]
         if i < 0 or i >= len(row):
             return ''
         return str(row[i]).strip()
+
+    # 過去に送信済みのメールアドレスを収集（重複送信防止）
+    sent_emails = set()
+    email_col = col_map['メールアドレス']
+    sent_col = col_map['メール送信済']
+    if email_col >= 0 and sent_col >= 0:
+        for row in data_rows:
+            sent_flag = str(row[sent_col]).strip() if sent_col < len(row) else ''
+            email_addr = str(row[email_col]).strip().lower() if email_col < len(row) else ''
+            if sent_flag and email_addr:
+                sent_emails.add(email_addr)
+    if sent_emails:
+        print(f'  過去送信済みメールアドレス: {len(sent_emails)}件（これらには送信しません）')
 
     for i, row in enumerate(data_rows):
         row_index = i + 2  # ヘッダー行(1) + 0-indexed → 1-indexed
@@ -237,6 +251,12 @@ def get_unsent_applicants(
             print(f'  行{row_index}: メールアドレスが空、スキップ ({_get(row, "名前")})')
             continue
 
+        # 過去に送信済みのメールアドレスはスキップ（再応募の重複送信防止）
+        if email_address.lower() in sent_emails:
+            skipped_already_contacted += 1
+            print(f'  行{row_index}: 過去送信済みアドレス、スキップ ({_get(row, "名前")}: {email_address})')
+            continue
+
         # 年齢を取得
         age = _parse_age(_get(row, '年齢'))
 
@@ -259,7 +279,7 @@ def get_unsent_applicants(
 
     print(f'応募者シート読み込み完了 (SS ID: {spreadsheet_id})')
     print(f'  全{len(data_rows)}件 → 未送信&直近{SEARCH_DAYS}日: {len(applicants)}件')
-    print(f'  スキップ内訳: 送信済={skipped_sent}, 期間外={skipped_old}, メールなし={skipped_no_email}')
+    print(f'  スキップ内訳: 送信済={skipped_sent}, 過去送信済アドレス={skipped_already_contacted}, 期間外={skipped_old}, メールなし={skipped_no_email}')
 
     return worksheet, applicants
 

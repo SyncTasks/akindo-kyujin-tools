@@ -11,7 +11,7 @@ CONFIG_SPREADSHEET_ID = os.environ.get(
 CONFIG_SHEET_NAME = 'ユーザ'
 
 # 応募者シート名（テンプレートSSの中のシート）
-APPLICANT_SHEET_NAME = '応募者シート'
+APPLICANT_SHEET_NAME = '応募者シート_メールテスト'
 
 # メール管理シート名（テンプレートSSの中のシート）
 MAIL_TEMPLATE_SHEET_NAME = 'メール管理'
