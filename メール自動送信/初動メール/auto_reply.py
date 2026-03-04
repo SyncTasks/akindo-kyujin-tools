@@ -119,6 +119,9 @@ def process_account(
         result['skipped_no_template'] = len(applicants)
         return result
 
+    # 同一バッチ内の送信済みアドレス追跡（重複送信防止）
+    batch_sent_emails = set()
+
     # 応募者ごとに処理
     for applicant in applicants:
         row = applicant['row_index']
@@ -135,6 +138,11 @@ def process_account(
         print(f'  クライアント名: {applicant_client}')
         print(f'  求人タイトル: {title}')
         print(f'  応募日時: {app_date}')
+
+        # 同一バッチ内の重複チェック
+        if to_address.lower() in batch_sent_emails:
+            print(f'    同一バッチ内で送信済みのアドレス → スキップ')
+            continue
 
         # クライアント名でテンプレートを照合
         client_templates = templates.get(applicant_client)
@@ -191,6 +199,7 @@ def process_account(
         )
 
         if success:
+            batch_sent_emails.add(to_address.lower())
             # 送信済みフラグを更新
             update_ok = mark_as_sent(worksheet, row, headers)
             if update_ok:
