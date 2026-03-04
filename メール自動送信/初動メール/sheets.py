@@ -274,7 +274,7 @@ def get_unsent_applicants(
             'name': _get(row, '名前'),
             'age': age,
             'email_address': email_address,
-            'client_name': _normalize_name(_get(row, 'クライアント名') or _get(row, 'クライアント')),
+            'client_name': _normalize_name(_get(row, 'クライアント')),
             'media_name': _normalize_media_name(_get(row, '媒体')),
             'title': _get(row, 'タイトル'),
             'application_date': date_str,
