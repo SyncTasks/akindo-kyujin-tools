@@ -96,6 +96,19 @@ def process_account(
         print(f'  このアカウントのクライアント名「{client_name}」に該当する応募者はいません')
         return result
 
+    # 媒体名フィルタ（設定SSの「媒体名」と応募者シートの「媒体」を照合）
+    account_media = account.get('media_name', '')
+    if account_media:
+        before_count = len(applicants)
+        applicants = [a for a in applicants if a.get('media_name', '') == account_media]
+        skipped_media = before_count - len(applicants)
+        if skipped_media > 0:
+            print(f'  媒体名フィルタ: {before_count}件 → {len(applicants)}件（媒体「{account_media}」以外{skipped_media}件除外）')
+
+        if not applicants:
+            print(f'  媒体名「{account_media}」に該当する応募者はいません')
+            return result
+
     # ヘッダー行を取得（送信済み更新で列位置を特定するため）
     headers = worksheet.row_values(1)
 

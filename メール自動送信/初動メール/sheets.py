@@ -123,6 +123,8 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
             print(f'  警告: {client_name} のメール文面（スプレッドシートID）が未設定、スキップ')
             continue
 
+        media_name = _normalize_media_name(str(record.get('媒体名', '')))
+
         # SMTPサーバーを判定（IMAP列 → メールドメイン → デフォルト）
         smtp_server, smtp_port = _resolve_smtp(imap_server, email)
 
@@ -131,6 +133,7 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
             'password': password,
             'mail_password': mail_password,
             'client_name': client_name,
+            'media_name': media_name,
             'template_spreadsheet_id': template_ss_id,
             'smtp_server': smtp_server,
             'smtp_port': smtp_port,
@@ -174,7 +177,7 @@ def get_unsent_applicants(
 
     # ヘッダー行から必要な列のインデックスを特定
     headers = all_values[0]
-    required_cols = ['メール送信済', '応募日時', '名前', '年齢', 'メールアドレス', 'クライアント名', 'クライアント', 'タイトル']
+    required_cols = ['メール送信済', '応募日時', '名前', '年齢', 'メールアドレス', 'クライアント名', 'クライアント', 'タイトル', '媒体']
     col_map = {}
     for col_name in required_cols:
         try:
@@ -272,6 +275,7 @@ def get_unsent_applicants(
             'age': age,
             'email_address': email_address,
             'client_name': _normalize_name(_get(row, 'クライアント名') or _get(row, 'クライアント')),
+            'media_name': _normalize_media_name(_get(row, '媒体')),
             'title': _get(row, 'タイトル'),
             'application_date': date_str,
             'columns': columns,
@@ -521,6 +525,32 @@ def _extract_spreadsheet_id(value: str) -> str:
 
     # URLでなければそのまま返す（IDとみなす）
     return value.strip()
+
+
+# 媒体名の表記揺れマッピング（キーは小文字で統一）
+_MEDIA_NAME_MAP = {
+    'airwork': 'エアワーク',
+    'エアワーク': 'エアワーク',
+    'engage': 'engage',
+    'ind': 'Indeed',
+    'indeed': 'Indeed',
+    'kbx': '求人ボックス',
+    '求人ボックス': '求人ボックス',
+    'ジョブオレ': 'ジョブオレ',
+    'ジモティ': 'ジモティ',
+}
+
+
+def _normalize_media_name(name: str) -> str:
+    """媒体名を正規化する（略称・表記揺れを統一）
+
+    応募者シート（AirWork, IND, KBX 等）と設定シート（エアワーク, Indeed, 求人ボックス 等）
+    の表記差を吸収する。
+    """
+    name = name.strip()
+    if not name:
+        return ''
+    return _MEDIA_NAME_MAP.get(name.lower(), _MEDIA_NAME_MAP.get(name, name))
 
 
 def _normalize_name(name: str) -> str:
