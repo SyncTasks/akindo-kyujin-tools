@@ -192,10 +192,9 @@ def get_unsent_applicants(
 
     data_rows = all_values[1:]
 
-    # 直近N日の判定基準: 今日の0:00からSEARCH_DAYS日前の0:00まで
+    # 直近N日の判定基準: 現在時刻からSEARCH_DAYS×24時間前
     now = datetime.now(JST)
-    today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
-    cutoff = today_start - timedelta(days=SEARCH_DAYS)
+    cutoff = now - timedelta(days=SEARCH_DAYS)
 
     applicants = []
     skipped_sent = 0
