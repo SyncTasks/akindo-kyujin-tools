@@ -145,7 +145,7 @@ def process_account(
             continue
 
         # 年齢に応じたテンプレートを選択
-        age_category = '34歳以下' if (age is None or age <= 34) else '35歳以上'
+        age_category = '35歳以下' if (age is None or age <= 35) else '36歳以上'
         template_text = select_template(age, client_templates)
 
         if not template_text:

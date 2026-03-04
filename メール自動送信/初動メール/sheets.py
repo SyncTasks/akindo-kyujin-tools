@@ -339,7 +339,7 @@ def get_mail_templates(
 
     # ヘッダー行から必要な列のインデックスを特定
     col_map = {}
-    for col_name in ['クライアント名', '送信者名', '件名', '34歳以下', '35歳以上']:
+    for col_name in ['クライアント名', '送信者名', '件名', '35歳以下', '36歳以上']:
         try:
             col_map[col_name] = headers.index(col_name)
         except ValueError:
@@ -360,8 +360,8 @@ def get_mail_templates(
 
         sender_name = _get_cell('送信者名')
         subject = _get_cell('件名')
-        under_35 = _get_cell('34歳以下')
-        over_35 = _get_cell('35歳以上')
+        under_35 = _get_cell('35歳以下')
+        over_35 = _get_cell('36歳以上')
 
         templates[client_name] = {
             'sender_name': sender_name,
@@ -442,7 +442,7 @@ def select_template(age: Optional[int], templates: dict) -> Optional[str]:
         print(f'    警告: 年齢不明のため「34歳以下」テンプレートをデフォルト使用')
         return templates.get('under_35') or None
 
-    if age <= 34:
+    if age <= 35:
         return templates.get('under_35') or None
     else:
         return templates.get('over_35') or None
