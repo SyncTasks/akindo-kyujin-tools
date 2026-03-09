@@ -108,8 +108,8 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
         if not is_mail_send:
             continue
 
-        email = str(record.get('メール', '')).strip()
-        password = str(record.get('パス', '')).strip()
+        email = str(record.get('メール送信アドレス', '')).strip()
+        password = str(record.get('メール送信アドレス_パス', '')).strip()
         mail_password = str(record.get('メールパス', '')).strip()
         client_name = _normalize_name(str(record.get('クライアント名', '')))
         template_ss_id = _extract_spreadsheet_id(str(record.get('メール文面', '')).strip())
