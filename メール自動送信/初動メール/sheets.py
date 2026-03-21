@@ -30,9 +30,42 @@ from config import (
     DOMAIN_TO_SMTP_MAP,
     SMTP_DEFAULT_SERVER,
     SMTP_DEFAULT_PORT,
+    ACCOUNT_WAIT_INTERVAL,
 )
 
 JST = timezone(timedelta(hours=9))
+
+
+# ===== Sheets API リトライヘルパー =====
+
+def _retry_on_quota(func, *args, description="Sheets API呼び出し", **kwargs):
+    """Google Sheets API のレート制限(429)エラー時にリトライする汎用ヘルパー
+
+    Args:
+        func: 実行する関数
+        *args: 関数に渡す引数
+        description: ログに表示する処理名
+        **kwargs: 関数に渡すキーワード引数
+
+    Returns:
+        関数の戻り値
+
+    Raises:
+        最後のリトライでも失敗した場合は元の例外をそのまま送出
+    """
+    last_exception = None
+    for attempt in range(SHEETS_API_MAX_RETRIES):
+        try:
+            return func(*args, **kwargs)
+        except gspread.exceptions.APIError as e:
+            if '429' in str(e) or 'RATE_LIMIT' in str(e) or 'Quota exceeded' in str(e):
+                last_exception = e
+                wait = (attempt + 1) * SHEETS_API_RETRY_INTERVAL
+                print(f'  Sheets APIレート制限 ({description}): {wait}秒後にリトライ ({attempt + 1}/{SHEETS_API_MAX_RETRIES})')
+                time.sleep(wait)
+            else:
+                raise
+    raise last_exception
 
 
 # ===== Google認証 =====
@@ -93,9 +126,12 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
         - template_spreadsheet_id: メール文面列のスプレッドシートID
     """
     try:
-        spreadsheet = client.open_by_key(CONFIG_SPREADSHEET_ID)
-        worksheet = spreadsheet.worksheet(CONFIG_SHEET_NAME)
-        records = worksheet.get_all_records()
+        def _read_config():
+            spreadsheet = client.open_by_key(CONFIG_SPREADSHEET_ID)
+            worksheet = spreadsheet.worksheet(CONFIG_SHEET_NAME)
+            return worksheet.get_all_records()
+
+        records = _retry_on_quota(_read_config, description="設定SS読み込み")
     except Exception as e:
         print(f'設定SS読み込みエラー: {e}')
         return []
@@ -151,7 +187,7 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
 def get_unsent_applicants(
     client: gspread.Client,
     spreadsheet_id: str,
-) -> Tuple[Optional[gspread.Worksheet], List[dict]]:
+) -> Tuple[Optional[gspread.Worksheet], List[dict], List[str]]:
     """応募者シートから未送信 & 直近N日以内の応募者を取得する
 
     Args:
@@ -159,21 +195,27 @@ def get_unsent_applicants(
         spreadsheet_id: テンプレート＆応募者スプレッドシートのID
 
     Returns:
-        (worksheet, applicants) のタプル
+        (worksheet, applicants, headers) のタプル
         - worksheet: 応募者シートの Worksheet オブジェクト（送信済み更新用）
         - applicants: 未送信応募者のリスト
+        - headers: ヘッダー行のリスト
     """
     try:
-        spreadsheet = client.open_by_key(spreadsheet_id)
-        worksheet = spreadsheet.worksheet(APPLICANT_SHEET_NAME)
-        all_values = worksheet.get_all_values()
+        def _read_applicants():
+            spreadsheet = client.open_by_key(spreadsheet_id)
+            ws = spreadsheet.worksheet(APPLICANT_SHEET_NAME)
+            return ws, ws.get_all_values()
+
+        worksheet, all_values = _retry_on_quota(
+            _read_applicants, description=f"応募者シート読み込み (SS: {spreadsheet_id})"
+        )
     except Exception as e:
         print(f'応募者シート読み込みエラー (SS ID: {spreadsheet_id}): {type(e).__name__}: {e}')
-        return None, []
+        return None, [], []
 
     if len(all_values) < 2:
         print(f'応募者シート: データ行がありません')
-        return worksheet, []
+        return worksheet, [], []
 
     # ヘッダー行から必要な列のインデックスを特定
     headers = all_values[0]
@@ -188,7 +230,7 @@ def get_unsent_applicants(
     # 必須列の存在チェック
     if col_map['メールアドレス'] < 0:
         print(f'応募者シート: 「メールアドレス」列が見つかりません')
-        return worksheet, []
+        return worksheet, [], headers
 
     data_rows = all_values[1:]
 
@@ -284,7 +326,7 @@ def get_unsent_applicants(
     print(f'  全{len(data_rows)}件 → 未送信&直近{SEARCH_DAYS}日: {len(applicants)}件')
     print(f'  スキップ内訳: 送信済={skipped_sent}, 過去送信済アドレス={skipped_already_contacted}, 期間外={skipped_old}, メールなし={skipped_no_email}')
 
-    return worksheet, applicants
+    return worksheet, applicants, headers
 
 
 # ===== メール管理シート読み込み =====
@@ -307,9 +349,14 @@ def get_mail_templates(
         - over_35: 35歳以上向けテンプレート文面
     """
     try:
-        spreadsheet = client.open_by_key(spreadsheet_id)
-        worksheet = spreadsheet.worksheet(MAIL_TEMPLATE_SHEET_NAME)
-        all_values = worksheet.get_all_values()
+        def _read_templates():
+            spreadsheet = client.open_by_key(spreadsheet_id)
+            ws = spreadsheet.worksheet(MAIL_TEMPLATE_SHEET_NAME)
+            return ws.get_all_values()
+
+        all_values = _retry_on_quota(
+            _read_templates, description=f"メール管理シート読み込み (SS: {spreadsheet_id})"
+        )
     except Exception as e:
         print(f'メール管理シート読み込みエラー (SS ID: {spreadsheet_id}): {e}')
         return {}
@@ -375,7 +422,7 @@ def get_mail_templates(
         has_subject = '○' if templates[name]['subject'] else '×'
         has_under = '○' if templates[name]['under_35'] else '×'
         has_over = '○' if templates[name]['over_35'] else '×'
-        print(f'  {name}: 件名={has_subject}, 34歳以下={has_under}, 35歳以上={has_over}')
+        print(f'  {name}: 件名={has_subject}, 35歳以下={has_under}, 36歳以上={has_over}')
 
     return templates
 

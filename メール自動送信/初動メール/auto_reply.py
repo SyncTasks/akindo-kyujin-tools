@@ -8,7 +8,7 @@
   2. 各アカウントの「メール文面」列 → テンプレート&応募者SS へ
   3. 応募者シートから メール送信済=空 & 応募日時が直近1日以内 の行を取得
   4. メール管理シートから クライアント名で照合 → 文面を取得
-  5. 年齢で「34歳以下」or「35歳以上」テンプレートを選択
+  5. 年齢で「35歳以下」or「36歳以上」テンプレートを選択
   6. SMTP送信
   7. 応募者シートの「メール送信済」列を更新
 """
@@ -20,7 +20,7 @@ import time
 import traceback
 from datetime import datetime, timezone, timedelta
 
-from config import SEARCH_DAYS, API_WAIT_INTERVAL
+from config import SEARCH_DAYS, API_WAIT_INTERVAL, ACCOUNT_WAIT_INTERVAL
 from logger import setup_logging, teardown_logging, JST
 from sheets import (
     get_sheets_client,
@@ -76,7 +76,7 @@ def process_account(
     print(f'{"=" * 60}')
 
     # 応募者シートから未送信行を取得
-    worksheet, applicants = get_unsent_applicants(sheets_client, ss_id)
+    worksheet, applicants, headers = get_unsent_applicants(sheets_client, ss_id)
     if worksheet is None:
         print(f'  応募者シートの読み込みに失敗しました')
         return result
@@ -108,9 +108,6 @@ def process_account(
         if not applicants:
             print(f'  媒体名「{account_media}」に該当する応募者はいません')
             return result
-
-    # ヘッダー行を取得（送信済み更新で列位置を特定するため）
-    headers = worksheet.row_values(1)
 
     # メール管理シートからテンプレートを取得
     templates = get_mail_templates(sheets_client, ss_id)
@@ -311,7 +308,12 @@ def main():
     total_failed = 0
     total_update_failed = 0
 
-    for account in accounts:
+    for i, account in enumerate(accounts):
+        # アカウント間のウェイト（最初のアカウント以外）
+        if i > 0:
+            print(f'\n[待機] 次のアカウント処理まで{ACCOUNT_WAIT_INTERVAL}秒待機（APIレート制限対策）')
+            time.sleep(ACCOUNT_WAIT_INTERVAL)
+
         try:
             result = process_account(sheets_client, account, dry_run=args.dry_run)
             total_sent += result['sent']

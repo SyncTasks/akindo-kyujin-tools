@@ -51,9 +51,12 @@ SEARCH_DAYS = 1
 # API呼び出し後の待機時間（秒）— レート制限対策
 API_WAIT_INTERVAL = 2
 
+# アカウント処理間の待機時間（秒）— Sheets API レート制限対策
+ACCOUNT_WAIT_INTERVAL = 3
+
 # Google Sheets API レート制限リトライ
-SHEETS_API_MAX_RETRIES = 3
-SHEETS_API_RETRY_INTERVAL = 5  # リトライ間隔ベース（秒）
+SHEETS_API_MAX_RETRIES = 5
+SHEETS_API_RETRY_INTERVAL = 10  # リトライ間隔ベース（秒）: 10, 20, 30, 40, 50
 
 # ===== ログ設定 =====
 # ログ保管期間（日数）: 今日と昨日を保持、一昨日以前を削除
