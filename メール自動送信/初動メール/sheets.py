@@ -24,6 +24,7 @@ from config import (
     APPLICANT_SHEET_NAME,
     MAIL_TEMPLATE_SHEET_NAME,
     SEARCH_DAYS,
+    OMIOKURI_DAYS,
     SHEETS_API_MAX_RETRIES,
     SHEETS_API_RETRY_INTERVAL,
     IMAP_TO_SMTP_MAP,
@@ -187,7 +188,8 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
 def get_unsent_applicants(
     client: gspread.Client,
     spreadsheet_id: str,
-) -> Tuple[Optional[gspread.Worksheet], List[dict], List[str]]:
+    global_sent_emails: Optional[set] = None,
+) -> Tuple[Optional[gspread.Worksheet], List[dict], List[str], set]:
     """応募者シートから未送信 & 直近N日以内の応募者を取得する
 
     Args:
@@ -211,15 +213,15 @@ def get_unsent_applicants(
         )
     except Exception as e:
         print(f'応募者シート読み込みエラー (SS ID: {spreadsheet_id}): {type(e).__name__}: {e}')
-        return None, [], []
+        return None, [], [], set(), []
 
     if len(all_values) < 2:
         print(f'応募者シート: データ行がありません')
-        return worksheet, [], []
+        return worksheet, [], [], set(), []
 
     # ヘッダー行から必要な列のインデックスを特定
     headers = all_values[0]
-    required_cols = ['メール送信済', '応募日時', '名前', '年齢', 'メールアドレス', 'クライアント名', 'クライアント', 'タイトル', '媒体']
+    required_cols = ['メール送信済', '応募日時', '名前', '年齢', 'メールアドレス', 'クライアント名', 'クライアント', 'タイトル', '媒体', 'お見送り']
     col_map = {}
     for col_name in required_cols:
         try:
@@ -230,7 +232,7 @@ def get_unsent_applicants(
     # 必須列の存在チェック
     if col_map['メールアドレス'] < 0:
         print(f'応募者シート: 「メールアドレス」列が見つかりません')
-        return worksheet, [], headers
+        return worksheet, [], headers, set(), []
 
     data_rows = all_values[1:]
 
@@ -239,6 +241,7 @@ def get_unsent_applicants(
     cutoff = now - timedelta(days=SEARCH_DAYS)
 
     applicants = []
+    duplicate_rows = []  # 重複と判定された行（お見送り○マーク用）
     skipped_sent = 0
     skipped_old = 0
     skipped_no_email = 0
@@ -250,18 +253,28 @@ def get_unsent_applicants(
             return ''
         return str(row[i]).strip()
 
-    # 過去に送信済みのメールアドレスを収集（重複送信防止）
-    sent_emails = set()
+    # 過去に送信済み or お見送り済みのメールアドレスを収集（重複送信防止）
+    sent_emails = set(global_sent_emails) if global_sent_emails else set()
+    local_sent_count = 0
     email_col = col_map['メールアドレス']
     sent_col = col_map['メール送信済']
-    if email_col >= 0 and sent_col >= 0:
+    omiokuri_col = col_map.get('お見送り', -1)
+    if email_col >= 0:
         for row in data_rows:
-            sent_flag = str(row[sent_col]).strip() if sent_col < len(row) else ''
+            sent_flag = str(row[sent_col]).strip() if sent_col >= 0 and sent_col < len(row) else ''
+            omiokuri_flag = str(row[omiokuri_col]).strip() if omiokuri_col >= 0 and omiokuri_col < len(row) else ''
             email_addr = str(row[email_col]).strip().lower() if email_col < len(row) else ''
-            if sent_flag and email_addr:
+            # メール送信済 or お見送り（○/済）があるアドレスは重複対象
+            if email_addr and (sent_flag or omiokuri_flag):
                 sent_emails.add(email_addr)
+                local_sent_count += 1
     if sent_emails:
-        print(f'  過去送信済みメールアドレス: {len(sent_emails)}件（これらには送信しません）')
+        cross_count = len(sent_emails) - local_sent_count
+        msg = f'  過去送信済み/お見送りメールアドレス: {local_sent_count}件（このシート）'
+        if cross_count > 0:
+            msg += f' + {cross_count}件（他クライアント）'
+        msg += '（これらには送信しません）'
+        print(msg)
 
     for i, row in enumerate(data_rows):
         row_index = i + 2  # ヘッダー行(1) + 0-indexed → 1-indexed
@@ -298,6 +311,7 @@ def get_unsent_applicants(
         # 過去に送信済みのメールアドレスはスキップ（再応募の重複送信防止）
         if email_address.lower() in sent_emails:
             skipped_already_contacted += 1
+            duplicate_rows.append({'row_index': row_index, 'name': _get(row, '名前'), 'email': email_address})
             print(f'  行{row_index}: 過去送信済みアドレス、スキップ ({_get(row, "名前")}: {email_address})')
             continue
 
@@ -326,7 +340,7 @@ def get_unsent_applicants(
     print(f'  全{len(data_rows)}件 → 未送信&直近{SEARCH_DAYS}日: {len(applicants)}件')
     print(f'  スキップ内訳: 送信済={skipped_sent}, 過去送信済アドレス={skipped_already_contacted}, 期間外={skipped_old}, メールなし={skipped_no_email}')
 
-    return worksheet, applicants, headers
+    return worksheet, applicants, headers, sent_emails, duplicate_rows
 
 
 # ===== メール管理シート読み込み =====
@@ -386,7 +400,7 @@ def get_mail_templates(
 
     # ヘッダー行から必要な列のインデックスを特定
     col_map = {}
-    for col_name in ['クライアント名', '送信者名', '件名', '35歳以下', '36歳以上']:
+    for col_name in ['クライアント名', '送信者名', '件名', '35歳以下', '36歳以上', 'お見送り']:
         try:
             col_map[col_name] = headers.index(col_name)
         except ValueError:
@@ -409,12 +423,14 @@ def get_mail_templates(
         subject = _get_cell('件名')
         under_35 = _get_cell('35歳以下')
         over_35 = _get_cell('36歳以上')
+        omiokuri = _get_cell('お見送り')
 
         templates[client_name] = {
             'sender_name': sender_name,
             'subject': subject,
             'under_35': under_35,
             'over_35': over_35,
+            'omiokuri': omiokuri,
         }
 
     print(f'メール管理シート読み込み完了: {len(templates)}件のテンプレート')
@@ -422,7 +438,8 @@ def get_mail_templates(
         has_subject = '○' if templates[name]['subject'] else '×'
         has_under = '○' if templates[name]['under_35'] else '×'
         has_over = '○' if templates[name]['over_35'] else '×'
-        print(f'  {name}: 件名={has_subject}, 35歳以下={has_under}, 36歳以上={has_over}')
+        has_omiokuri = '○' if templates[name]['omiokuri'] else '×'
+        print(f'  {name}: 件名={has_subject}, 35歳以下={has_under}, 36歳以上={has_over}, お見送り={has_omiokuri}')
 
     return templates
 
@@ -470,6 +487,189 @@ def mark_as_sent(
 
     print(f'  エラー: 行{row_index}のメール送信済更新がリトライ上限に達しました')
     return False
+
+
+def mark_as_omiokuri(
+    worksheet: gspread.Worksheet,
+    row_index: int,
+    headers: List[str],
+) -> bool:
+    """応募者シートの「お見送り」列に○を書き込む（リトライ付き）
+
+    他クライアントで既に送信済みのアドレスなど、重複と判定された場合に使用。
+
+    Args:
+        worksheet: 応募者シートの Worksheet オブジェクト
+        row_index: 更新する行番号（1-indexed）
+        headers: ヘッダー行のリスト
+
+    Returns:
+        True: 更新成功, False: 更新失敗
+    """
+    try:
+        col_index = headers.index('お見送り') + 1  # gspread は 1-indexed
+    except ValueError:
+        print(f'  警告: 「お見送り」列がヘッダーに見つかりません（お見送り更新をスキップ）')
+        return False
+
+    for attempt in range(SHEETS_API_MAX_RETRIES):
+        try:
+            worksheet.update_cell(row_index, col_index, '○')
+            return True
+        except gspread.exceptions.APIError as e:
+            if '429' in str(e) or 'RATE_LIMIT' in str(e):
+                wait = (attempt + 1) * SHEETS_API_RETRY_INTERVAL
+                print(f'  Sheets APIレート制限 (お見送り更新): {wait}秒後にリトライ ({attempt + 1}/{SHEETS_API_MAX_RETRIES})')
+                time.sleep(wait)
+            else:
+                print(f'  エラー: 行{row_index}のお見送り更新に失敗 (API): {e}')
+                return False
+        except Exception as e:
+            print(f'  エラー: 行{row_index}のお見送り更新に失敗: {e}')
+            return False
+
+    print(f'  エラー: 行{row_index}のお見送り更新がリトライ上限に達しました')
+    return False
+
+
+def mark_omiokuri_sent(
+    worksheet: gspread.Worksheet,
+    row_index: int,
+    headers: List[str],
+) -> bool:
+    """応募者シートの「お見送り」列を○→済に更新する（リトライ付き）
+
+    お見送りメール送信成功後に呼び出す。
+
+    Args:
+        worksheet: 応募者シートの Worksheet オブジェクト
+        row_index: 更新する行番号（1-indexed）
+        headers: ヘッダー行のリスト
+
+    Returns:
+        True: 更新成功, False: 更新失敗
+    """
+    try:
+        col_index = headers.index('お見送り') + 1
+    except ValueError:
+        print(f'  エラー: 「お見送り」列がヘッダーに見つかりません')
+        return False
+
+    for attempt in range(SHEETS_API_MAX_RETRIES):
+        try:
+            worksheet.update_cell(row_index, col_index, '済')
+            return True
+        except gspread.exceptions.APIError as e:
+            if '429' in str(e) or 'RATE_LIMIT' in str(e):
+                wait = (attempt + 1) * SHEETS_API_RETRY_INTERVAL
+                print(f'  Sheets APIレート制限 (お見送り済更新): {wait}秒後にリトライ ({attempt + 1}/{SHEETS_API_MAX_RETRIES})')
+                time.sleep(wait)
+            else:
+                print(f'  エラー: 行{row_index}のお見送り済更新に失敗 (API): {e}')
+                return False
+        except Exception as e:
+            print(f'  エラー: 行{row_index}のお見送り済更新に失敗: {e}')
+            return False
+
+    print(f'  エラー: 行{row_index}のお見送り済更新がリトライ上限に達しました')
+    return False
+
+
+def get_omiokuri_applicants(
+    client: gspread.Client,
+    spreadsheet_id: str,
+) -> Tuple[Optional[gspread.Worksheet], List[dict], List[str]]:
+    """応募者シートから お見送り=○ かつ 応募日時から2日以上経過した行を取得する
+
+    Args:
+        client: gspread クライアント
+        spreadsheet_id: スプレッドシートのID
+
+    Returns:
+        (worksheet, applicants, headers) のタプル
+    """
+    try:
+        def _read():
+            spreadsheet = client.open_by_key(spreadsheet_id)
+            ws = spreadsheet.worksheet(APPLICANT_SHEET_NAME)
+            return ws, ws.get_all_values()
+
+        worksheet, all_values = _retry_on_quota(
+            _read, description=f"応募者シート読み込み/お見送り (SS: {spreadsheet_id})"
+        )
+    except Exception as e:
+        print(f'応募者シート読み込みエラー/お見送り (SS ID: {spreadsheet_id}): {type(e).__name__}: {e}')
+        return None, [], []
+
+    if len(all_values) < 2:
+        return worksheet, [], []
+
+    headers = all_values[0]
+    col_map = {}
+    for col_name in ['お見送り', '応募日時', '名前', '年齢', 'メールアドレス', 'クライアント', 'タイトル', '媒体']:
+        try:
+            col_map[col_name] = headers.index(col_name)
+        except ValueError:
+            col_map[col_name] = -1
+
+    if col_map['お見送り'] < 0:
+        print(f'  応募者シート: 「お見送り」列が見つかりません')
+        return worksheet, [], headers
+
+    data_rows = all_values[1:]
+    now = datetime.now(JST)
+    cutoff = now - timedelta(days=OMIOKURI_DAYS)
+
+    def _get(row, col_name):
+        i = col_map[col_name]
+        if i < 0 or i >= len(row):
+            return ''
+        return str(row[i]).strip()
+
+    applicants = []
+    for i, row in enumerate(data_rows):
+        row_index = i + 2
+
+        # お見送り=○ のみ対象（済やそれ以外はスキップ）
+        omiokuri_flag = _get(row, 'お見送り')
+        if omiokuri_flag != '○':
+            continue
+
+        # 応募日時から2日以上経過しているか
+        date_str = _get(row, '応募日時')
+        if not date_str:
+            continue
+        app_date = _parse_date(date_str)
+        if app_date is None:
+            continue
+        if app_date > cutoff:
+            continue  # まだ2日経っていない
+
+        email_address = _get(row, 'メールアドレス')
+        if not email_address:
+            continue
+
+        columns = {}
+        for col_idx, col_name in enumerate(headers):
+            if col_name and col_idx < len(row):
+                columns[col_name] = str(row[col_idx]).strip()
+
+        applicants.append({
+            'row_index': row_index,
+            'name': _get(row, '名前'),
+            'age': _parse_age(_get(row, '年齢')),
+            'email_address': email_address,
+            'client_name': _normalize_name(_get(row, 'クライアント')),
+            'media_name': _normalize_media_name(_get(row, '媒体')),
+            'title': _get(row, 'タイトル'),
+            'application_date': date_str,
+            'columns': columns,
+        })
+
+    if applicants:
+        print(f'  お見送りメール対象: {len(applicants)}件（お見送り=○ & 応募から{OMIOKURI_DAYS}日以上経過）')
+
+    return worksheet, applicants, headers
 
 
 # ===== テンプレート選択 =====

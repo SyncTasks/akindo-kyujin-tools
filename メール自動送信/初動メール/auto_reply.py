@@ -20,7 +20,7 @@ import time
 import traceback
 from datetime import datetime, timezone, timedelta
 
-from config import SEARCH_DAYS, API_WAIT_INTERVAL, ACCOUNT_WAIT_INTERVAL
+from config import SEARCH_DAYS, OMIOKURI_DAYS, API_WAIT_INTERVAL, ACCOUNT_WAIT_INTERVAL
 from logger import setup_logging, teardown_logging, JST
 from sheets import (
     get_sheets_client,
@@ -28,6 +28,9 @@ from sheets import (
     get_unsent_applicants,
     get_mail_templates,
     mark_as_sent,
+    mark_as_omiokuri,
+    mark_omiokuri_sent,
+    get_omiokuri_applicants,
     select_template,
 )
 from mailer import send_email, build_email_body
@@ -37,6 +40,8 @@ def process_account(
     sheets_client,
     account: dict,
     dry_run: bool = False,
+    batch_sent_emails: set = None,
+    global_sent_emails: set = None,
 ) -> dict:
     """1つのアカウントを処理する
 
@@ -75,11 +80,34 @@ def process_account(
     print(f'SMTPサーバー: {smtp_server}:{smtp_port}')
     print(f'{"=" * 60}')
 
-    # 応募者シートから未送信行を取得
-    worksheet, applicants, headers = get_unsent_applicants(sheets_client, ss_id)
+    # 共有セットの初期化（外部から渡されなかった場合）
+    if batch_sent_emails is None:
+        batch_sent_emails = set()
+    if global_sent_emails is None:
+        global_sent_emails = set()
+
+    # 応募者シートから未送信行を取得（他クライアントの送信済みアドレスも考慮）
+    worksheet, applicants, headers, local_sent_emails, duplicate_rows = get_unsent_applicants(
+        sheets_client, ss_id, global_sent_emails=global_sent_emails,
+    )
     if worksheet is None:
         print(f'  応募者シートの読み込みに失敗しました')
         return result
+    # このシートの送信済みアドレスをグローバルに蓄積
+    global_sent_emails.update(local_sent_emails)
+
+    # 重複と判定された行にお見送り○をマーク
+    if duplicate_rows and not dry_run:
+        print(f'  重複検知: {len(duplicate_rows)}件にお見送り○をマーク')
+        for dup in duplicate_rows:
+            ok = mark_as_omiokuri(worksheet, dup['row_index'], headers)
+            if ok:
+                print(f'    行{dup["row_index"]}: {dup["name"]} ({dup["email"]}) → お見送り○')
+            else:
+                print(f'    行{dup["row_index"]}: {dup["name"]} ({dup["email"]}) → お見送りマーク失敗')
+            time.sleep(API_WAIT_INTERVAL)
+    elif duplicate_rows and dry_run:
+        print(f'  [DRY-RUN] 重複検知: {len(duplicate_rows)}件にお見送り○をマーク（スキップ）')
 
     if not applicants:
         print(f'  未送信の応募者はいません')
@@ -116,9 +144,6 @@ def process_account(
         result['skipped_no_template'] = len(applicants)
         return result
 
-    # 同一バッチ内の送信済みアドレス追跡（重複送信防止）
-    batch_sent_emails = set()
-
     # 応募者ごとに処理
     for applicant in applicants:
         row = applicant['row_index']
@@ -138,7 +163,10 @@ def process_account(
 
         # 同一バッチ内の重複チェック
         if to_address.lower() in batch_sent_emails:
-            print(f'    同一バッチ内で送信済みのアドレス → スキップ')
+            print(f'    同一バッチ内で送信済みのアドレス → スキップ & お見送り○')
+            if not dry_run:
+                mark_as_omiokuri(worksheet, row, headers)
+                time.sleep(API_WAIT_INTERVAL)
             continue
 
         # クライアント名でテンプレートを照合
@@ -211,6 +239,118 @@ def process_account(
             time.sleep(API_WAIT_INTERVAL)
         else:
             print(f'    送信失敗')
+            result['failed'] += 1
+
+    return result
+
+
+def process_omiokuri_account(
+    sheets_client,
+    account: dict,
+    dry_run: bool = False,
+) -> dict:
+    """1つのアカウントのお見送りメールを処理する
+
+    お見送り=○ かつ 応募日時から2日以上経過した応募者に
+    お見送りメールを送信し、お見送り列を済に更新する。
+
+    Returns:
+        処理結果の辞書:
+        - sent: 送信成功件数
+        - failed: 送信失敗件数
+        - skipped_no_template: テンプレートなし件数
+    """
+    client_name = account['client_name']
+    email = account['email']
+    password = account['password']
+    mail_password = account.get('mail_password', '')
+    ss_id = account['template_spreadsheet_id']
+    smtp_server = account.get('smtp_server', 'smtp.muumuu-mail.com')
+    smtp_port = account.get('smtp_port', 587)
+
+    result = {'sent': 0, 'failed': 0, 'skipped_no_template': 0}
+
+    # お見送り対象の応募者を取得
+    worksheet, applicants, headers = get_omiokuri_applicants(sheets_client, ss_id)
+    if worksheet is None or not applicants:
+        return result
+
+    # クライアント名フィルタ
+    applicants = [a for a in applicants if a['client_name'] == client_name]
+
+    # 媒体名フィルタ
+    account_media = account.get('media_name', '')
+    if account_media:
+        applicants = [a for a in applicants if a.get('media_name', '') == account_media]
+
+    if not applicants:
+        return result
+
+    # テンプレート取得
+    templates = get_mail_templates(sheets_client, ss_id)
+    if not templates:
+        result['skipped_no_template'] = len(applicants)
+        return result
+
+    for applicant in applicants:
+        row = applicant['row_index']
+        name = applicant['name']
+        to_address = applicant['email_address']
+        applicant_client = applicant['client_name']
+
+        print(f'\n  --- [お見送り] 行{row}: {name} ---')
+        print(f'  宛先: {to_address}')
+
+        # テンプレート照合
+        client_templates = templates.get(applicant_client)
+        if not client_templates or not client_templates.get('omiokuri'):
+            print(f'    お見送りテンプレートなし → スキップ')
+            result['skipped_no_template'] += 1
+            continue
+
+        template_text = client_templates['omiokuri']
+        body = build_email_body(template_text, applicant)
+        if not body:
+            print(f'    お見送り本文が空 → スキップ')
+            result['skipped_no_template'] += 1
+            continue
+
+        # 件名（お見送り用テンプレートの件名 or デフォルト）
+        subject = _build_subject(applicant, client_templates.get('subject', ''))
+        sender_name = client_templates.get('sender_name', '')
+
+        print(f'    件名: {subject}')
+        body_preview = body[:100] + '...' if len(body) > 100 else body
+        print(f'    本文プレビュー: {body_preview}')
+
+        if dry_run:
+            print(f'    [DRY-RUN] お見送りメール送信をスキップ')
+            result['sent'] += 1
+            continue
+
+        success = send_email(
+            smtp_user=email,
+            smtp_password=password,
+            to_address=to_address,
+            subject=subject,
+            body=body,
+            smtp_server=smtp_server,
+            smtp_port=smtp_port,
+            fallback_password=mail_password,
+            sender_name=sender_name,
+        )
+
+        if success:
+            update_ok = mark_omiokuri_sent(worksheet, row, headers)
+            if update_ok:
+                print(f'    お見送りメール送信完了 → 済')
+                result['sent'] += 1
+            else:
+                print(f'    警告: お見送りメール送信済みだが、済への更新に失敗')
+                result['sent'] += 1
+            time.sleep(API_WAIT_INTERVAL)
+        else:
+            print(f'    お見送りメール送信失敗')
             result['failed'] += 1
 
     return result
@@ -308,6 +448,10 @@ def main():
     total_failed = 0
     total_update_failed = 0
 
+    # クライアント横断の重複チェック用共有セット
+    batch_sent_emails = set()
+    global_sent_emails = set()
+
     for i, account in enumerate(accounts):
         # アカウント間のウェイト（最初のアカウント以外）
         if i > 0:
@@ -315,7 +459,11 @@ def main():
             time.sleep(ACCOUNT_WAIT_INTERVAL)
 
         try:
-            result = process_account(sheets_client, account, dry_run=args.dry_run)
+            result = process_account(
+                sheets_client, account, dry_run=args.dry_run,
+                batch_sent_emails=batch_sent_emails,
+                global_sent_emails=global_sent_emails,
+            )
             total_sent += result['sent']
             total_skipped_template += result['skipped_no_template']
             total_skipped_body += result['skipped_empty_body']
@@ -324,6 +472,35 @@ def main():
         except Exception as e:
             print(f'\n[{account["client_name"]}] 致命的エラー:')
             print(traceback.format_exc())
+
+    # ===== お見送りメール処理（10時台のみ） =====
+    # TODO: お見送りメール送信を有効化する際はコメントアウトを解除
+    # now_jst = datetime.now(JST)
+    # omiokuri_sent = 0
+    # omiokuri_failed = 0
+    # omiokuri_no_template = 0
+    #
+    # if now_jst.hour == 10:
+    #     print(f'\n{"=" * 60}')
+    #     print(f'お見送りメール処理（10時台: {now_jst.strftime("%H:%M")}）')
+    #     print(f'対象: お見送り=○ & 応募から{OMIOKURI_DAYS}日以上経過')
+    #     print(f'{"=" * 60}')
+    #
+    #     for i, account in enumerate(accounts):
+    #         if i > 0:
+    #             time.sleep(ACCOUNT_WAIT_INTERVAL)
+    #         try:
+    #             omi_result = process_omiokuri_account(
+    #                 sheets_client, account, dry_run=args.dry_run,
+    #             )
+    #             omiokuri_sent += omi_result['sent']
+    #             omiokuri_failed += omi_result['failed']
+    #             omiokuri_no_template += omi_result['skipped_no_template']
+    #         except Exception as e:
+    #             print(f'\n[{account["client_name"]}] お見送り処理エラー:')
+    #             print(traceback.format_exc())
+    # else:
+    #     print(f'\n[お見送りメール] 現在{now_jst.hour}時台 → 10時台ではないためスキップ')
 
     # サマリー表示
     total_elapsed = time.time() - main_start

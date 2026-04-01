@@ -48,6 +48,9 @@ DOMAIN_TO_SMTP_MAP = {
 # 応募日時の検索対象期間（日数）
 SEARCH_DAYS = 1
 
+# お見送りメール送信までの待機日数（応募日時から起算）
+OMIOKURI_DAYS = 2
+
 # API呼び出し後の待機時間（秒）— レート制限対策
 API_WAIT_INTERVAL = 2
 
