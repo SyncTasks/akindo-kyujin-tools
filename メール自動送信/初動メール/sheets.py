@@ -36,6 +36,48 @@ from config import (
 
 JST = timezone(timedelta(hours=9))
 
+# ===== 応募者シートキャッシュ =====
+# SS ID → (worksheet, all_values) を保持し、同じシートの再読み込みを防ぐ
+_applicant_sheet_cache: Dict[str, Tuple[gspread.Worksheet, list]] = {}
+
+
+def _get_applicant_sheet(client: gspread.Client, spreadsheet_id: str, description: str = "") -> Tuple[Optional[gspread.Worksheet], list]:
+    """応募者シートを取得する（キャッシュあり）
+
+    同じスプレッドシートIDに対しては1回だけAPIを呼び出し、
+    2回目以降はキャッシュから返す。
+
+    Args:
+        client: gspread クライアント
+        spreadsheet_id: スプレッドシートID
+        description: ログ用の処理名
+
+    Returns:
+        (worksheet, all_values) のタプル。失敗時は (None, [])
+    """
+    if spreadsheet_id in _applicant_sheet_cache:
+        print(f'  応募者シート: キャッシュ使用 (SS: {spreadsheet_id[:8]}...)')
+        return _applicant_sheet_cache[spreadsheet_id]
+
+    try:
+        def _read():
+            spreadsheet = client.open_by_key(spreadsheet_id)
+            ws = spreadsheet.worksheet(APPLICANT_SHEET_NAME)
+            return ws, ws.get_all_values()
+
+        desc = description or f"応募者シート読み込み (SS: {spreadsheet_id})"
+        worksheet, all_values = _retry_on_quota(_read, description=desc)
+        _applicant_sheet_cache[spreadsheet_id] = (worksheet, all_values)
+        return worksheet, all_values
+    except Exception as e:
+        print(f'応募者シート読み込みエラー (SS ID: {spreadsheet_id}): {type(e).__name__}: {e}')
+        return None, []
+
+
+def clear_applicant_sheet_cache():
+    """応募者シートキャッシュをクリアする"""
+    _applicant_sheet_cache.clear()
+
 
 # ===== Sheets API リトライヘルパー =====
 
@@ -183,6 +225,74 @@ def get_active_accounts(client: gspread.Client) -> List[dict]:
     return accounts
 
 
+# ===== 送信済みアドレス事前収集 =====
+
+def collect_all_sent_emails(
+    client: gspread.Client,
+    accounts: List[dict],
+) -> set:
+    """全アカウントの応募者シートから送信済み・お見送り済みのメールアドレスを収集する
+
+    実行をまたぐクライアント横断の重複送信防止に使用する。
+
+    Args:
+        client: gspread クライアント
+        accounts: アカウント情報のリスト
+
+    Returns:
+        送信済みメールアドレスのセット（小文字正規化済み）
+    """
+    sent_emails = set()
+    # 同じSSを重複して読まないようにする
+    seen_ss_ids = set()
+
+    for account in accounts:
+        ss_id = account['template_spreadsheet_id']
+        if ss_id in seen_ss_ids:
+            continue
+        seen_ss_ids.add(ss_id)
+
+        worksheet, all_values = _get_applicant_sheet(
+            client, ss_id, description=f"送信済み収集 (SS: {ss_id})"
+        )
+        if worksheet is None or len(all_values) < 2:
+            continue
+
+        headers = all_values[0]
+        email_col = -1
+        sent_col = -1
+        omiokuri_col = -1
+        try:
+            email_col = headers.index('メールアドレス')
+        except ValueError:
+            continue
+        try:
+            sent_col = headers.index('メール送信済')
+        except ValueError:
+            pass
+        try:
+            omiokuri_col = headers.index('お見送り')
+        except ValueError:
+            pass
+
+        count = 0
+        for row in all_values[1:]:
+            email_addr = str(row[email_col]).strip().lower() if email_col < len(row) else ''
+            if not email_addr:
+                continue
+            sent_flag = str(row[sent_col]).strip() if sent_col >= 0 and sent_col < len(row) else ''
+            omiokuri_flag = str(row[omiokuri_col]).strip() if omiokuri_col >= 0 and omiokuri_col < len(row) else ''
+            if sent_flag or omiokuri_flag:
+                sent_emails.add(email_addr)
+                count += 1
+
+        print(f'  SS {ss_id[:8]}...: 送信済み/お見送り {count}件')
+        time.sleep(ACCOUNT_WAIT_INTERVAL)
+
+    print(f'  全クライアント合計: 送信済みアドレス {len(sent_emails)}件')
+    return sent_emails
+
+
 # ===== 応募者シート読み込み =====
 
 def get_unsent_applicants(
@@ -202,17 +312,10 @@ def get_unsent_applicants(
         - applicants: 未送信応募者のリスト
         - headers: ヘッダー行のリスト
     """
-    try:
-        def _read_applicants():
-            spreadsheet = client.open_by_key(spreadsheet_id)
-            ws = spreadsheet.worksheet(APPLICANT_SHEET_NAME)
-            return ws, ws.get_all_values()
-
-        worksheet, all_values = _retry_on_quota(
-            _read_applicants, description=f"応募者シート読み込み (SS: {spreadsheet_id})"
-        )
-    except Exception as e:
-        print(f'応募者シート読み込みエラー (SS ID: {spreadsheet_id}): {type(e).__name__}: {e}')
+    worksheet, all_values = _get_applicant_sheet(
+        client, spreadsheet_id, description=f"応募者シート読み込み (SS: {spreadsheet_id})"
+    )
+    if worksheet is None:
         return None, [], [], set(), []
 
     if len(all_values) < 2:
@@ -400,7 +503,7 @@ def get_mail_templates(
 
     # ヘッダー行から必要な列のインデックスを特定
     col_map = {}
-    for col_name in ['クライアント名', '送信者名', '件名', '35歳以下', '36歳以上', 'お見送り']:
+    for col_name in ['クライアント名', '送信者名', '件名', '35歳以下', '36歳以上', 'お見送り', '35歳以下男性']:
         try:
             col_map[col_name] = headers.index(col_name)
         except ValueError:
@@ -424,6 +527,7 @@ def get_mail_templates(
         under_35 = _get_cell('35歳以下')
         over_35 = _get_cell('36歳以上')
         omiokuri = _get_cell('お見送り')
+        under_35_male = _get_cell('35歳以下男性')
 
         templates[client_name] = {
             'sender_name': sender_name,
@@ -431,6 +535,7 @@ def get_mail_templates(
             'under_35': under_35,
             'over_35': over_35,
             'omiokuri': omiokuri,
+            'under_35_male': under_35_male,
         }
 
     print(f'メール管理シート読み込み完了: {len(templates)}件のテンプレート')
@@ -588,17 +693,10 @@ def get_omiokuri_applicants(
     Returns:
         (worksheet, applicants, headers) のタプル
     """
-    try:
-        def _read():
-            spreadsheet = client.open_by_key(spreadsheet_id)
-            ws = spreadsheet.worksheet(APPLICANT_SHEET_NAME)
-            return ws, ws.get_all_values()
-
-        worksheet, all_values = _retry_on_quota(
-            _read, description=f"応募者シート読み込み/お見送り (SS: {spreadsheet_id})"
-        )
-    except Exception as e:
-        print(f'応募者シート読み込みエラー/お見送り (SS ID: {spreadsheet_id}): {type(e).__name__}: {e}')
+    worksheet, all_values = _get_applicant_sheet(
+        client, spreadsheet_id, description=f"応募者シート読み込み/お見送り (SS: {spreadsheet_id})"
+    )
+    if worksheet is None:
         return None, [], []
 
     if len(all_values) < 2:
@@ -674,12 +772,13 @@ def get_omiokuri_applicants(
 
 # ===== テンプレート選択 =====
 
-def select_template(age: Optional[int], templates: dict) -> Optional[str]:
-    """年齢に応じたテンプレートを選択する
+def select_template(age: Optional[int], templates: dict, gender: str = '') -> Optional[str]:
+    """年齢・性別に応じたテンプレートを選択する
 
     Args:
         age: 応募者の年齢（None の場合は判定不可）
-        templates: テンプレート辞書（under_35, over_35）
+        templates: テンプレート辞書（under_35, over_35, under_35_male）
+        gender: 応募者の性別（「男性」など）
 
     Returns:
         テンプレート文面。選択不可の場合は None。
@@ -690,6 +789,8 @@ def select_template(age: Optional[int], templates: dict) -> Optional[str]:
         return templates.get('under_35') or None
 
     if age <= 35:
+        if gender == '男性' and templates.get('under_35_male'):
+            return templates['under_35_male']
         return templates.get('under_35') or None
     else:
         return templates.get('over_35') or None

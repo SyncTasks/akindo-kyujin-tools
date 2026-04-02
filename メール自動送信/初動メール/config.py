@@ -62,5 +62,5 @@ SHEETS_API_MAX_RETRIES = 5
 SHEETS_API_RETRY_INTERVAL = 10  # リトライ間隔ベース（秒）: 10, 20, 30, 40, 50
 
 # ===== ログ設定 =====
-# ログ保管期間（日数）: 今日と昨日を保持、一昨日以前を削除
-LOG_RETENTION_DAYS = 1
+# ログ保管期間（日数）: 今日から指定日数前までを保持、それ以前を削除
+LOG_RETENTION_DAYS = 14
